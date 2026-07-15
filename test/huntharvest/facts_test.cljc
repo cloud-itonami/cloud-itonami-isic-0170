@@ -1,0 +1,143 @@
+(ns huntharvest.facts-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [huntharvest.facts :as facts]))
+
+;; ──────────────────────── Harvest-Method Lookups ──────────────────────
+
+(deftest harvest-method-by-id-test
+  (testing "leg-hold-fur-bearer trap method exists"
+    (let [m (facts/harvest-method-by-id :trap/leg-hold-fur-bearer)]
+      (is (some? m))
+      (is (= (:id m) :trap/leg-hold-fur-bearer))
+      (is (true? (:trap-based? m)))
+      (is (= (:trap-check-interval-hours m) 24))))
+
+  (testing "big-game-rifle harvest method exists and has no trap spec"
+    (let [m (facts/harvest-method-by-id :hunt/big-game-rifle)]
+      (is (some? m))
+      (is (false? (:trap-based? m)))
+      (is (nil? (:trap-check-interval-hours m)))
+      (is (nil? (:min-trap-setback-m m)))))
+
+  (testing "nonexistent harvest method returns nil"
+    (is (nil? (facts/harvest-method-by-id :nonexistent/method)))))
+
+;; ──────────────────────── Jurisdiction Lookups ──────────────────────
+
+(deftest jurisdiction-by-id-test
+  (testing "JP MAFF/wildlife jurisdiction exists"
+    (let [j (facts/jurisdiction-by-id :jp/maff-wildlife)]
+      (is (some? j))
+      (is (contains? (set (:required-evidence j)) :harvest-tag-record))))
+
+  (testing "US USFWS jurisdiction exists"
+    (let [j (facts/jurisdiction-by-id :us/usfws)]
+      (is (some? j))
+      (is (contains? (set (:required-evidence j)) :quota-allocation-record))))
+
+  (testing "EU Habitats Directive jurisdiction exists"
+    (let [j (facts/jurisdiction-by-id :eu/habitats-directive)]
+      (is (some? j))
+      (is (contains? (set (:required-evidence j)) :species-identification-log))))
+
+  (testing "nonexistent jurisdiction returns nil"
+    (is (nil? (facts/jurisdiction-by-id :xx/unknown)))))
+
+;; ──────────────────────── Wildlife-Harvest Safety Predicates ──────────
+
+(deftest hunter-license-current-test
+  (testing "license expiring in the future is current"
+    (is (true? (facts/hunter-license-current? 2000 1000))))
+
+  (testing "license expiring in the past is not current"
+    (is (false? (facts/hunter-license-current? 500 1000))))
+
+  (testing "license expiring exactly now is current"
+    (is (true? (facts/hunter-license-current? 1000 1000)))))
+
+(deftest trap-inspection-current-test
+  (let [trap-method (facts/harvest-method-by-id :trap/leg-hold-fur-bearer)
+        hunt-method (facts/harvest-method-by-id :hunt/big-game-rifle)
+        now 1000000000
+        ten-days-ago (- now (* 10 24 60 60 1000))
+        two-hundred-days-ago (- now (* 200 24 60 60 1000))]
+    (testing "recent inspection is current"
+      (is (true? (facts/trap-inspection-current? ten-days-ago now trap-method))))
+
+    (testing "overdue inspection is not current"
+      (is (false? (facts/trap-inspection-current? two-hundred-days-ago now trap-method))))
+
+    (testing "direct-take harvest method never needs trap inspection"
+      (is (false? (facts/trap-inspection-current? ten-days-ago now hunt-method))))))
+
+(deftest trap-check-interval-satisfied-test
+  (let [trap-method (facts/harvest-method-by-id :trap/leg-hold-fur-bearer)
+        hunt-method (facts/harvest-method-by-id :hunt/big-game-rifle)]
+    (testing "hours-since-last-check at or below interval passes"
+      (is (true? (facts/trap-check-interval-satisfied? 24 trap-method)))
+      (is (true? (facts/trap-check-interval-satisfied? 10 trap-method))))
+
+    (testing "hours-since-last-check above interval fails"
+      (is (false? (facts/trap-check-interval-satisfied? 30 trap-method))))
+
+    (testing "direct-take harvest method has no trap-check interval to satisfy"
+      (is (false? (facts/trap-check-interval-satisfied? 10 hunt-method))))))
+
+(deftest trap-setback-in-range-test
+  (let [trap-method (facts/harvest-method-by-id :trap/leg-hold-fur-bearer)
+        hunt-method (facts/harvest-method-by-id :hunt/big-game-rifle)]
+    (testing "setback at or above minimum passes"
+      (is (true? (facts/trap-setback-in-range? 30.0 trap-method)))
+      (is (true? (facts/trap-setback-in-range? 50.0 trap-method))))
+
+    (testing "setback below minimum fails"
+      (is (false? (facts/trap-setback-in-range? 10.0 trap-method))))
+
+    (testing "direct-take harvest method has no trap-setback minimum"
+      (is (false? (facts/trap-setback-in-range? 50.0 hunt-method))))))
+
+(deftest quota-satisfied-test
+  (testing "harvest count strictly below quota is satisfied"
+    (is (true? (facts/quota-satisfied? 2 5))))
+
+  (testing "harvest count at quota is not satisfied"
+    (is (false? (facts/quota-satisfied? 5 5))))
+
+  (testing "harvest count above quota is not satisfied"
+    (is (false? (facts/quota-satisfied? 7 5)))))
+
+(deftest in-open-season-test
+  (testing "harvest within the season window is in season"
+    (is (true? (facts/in-open-season? 1500 1000 2000))))
+
+  (testing "harvest before season open is not in season"
+    (is (false? (facts/in-open-season? 500 1000 2000))))
+
+  (testing "harvest after season close is not in season"
+    (is (false? (facts/in-open-season? 2500 1000 2000))))
+
+  (testing "harvest exactly at season boundaries is in season"
+    (is (true? (facts/in-open-season? 1000 1000 2000)))
+    (is (true? (facts/in-open-season? 2000 1000 2000)))))
+
+;; ──────────────────────── Evidence Completeness ──────────────────────
+
+(deftest required-evidence-satisfied-test
+  (testing "complete evidence checklist passes"
+    (let [j (facts/jurisdiction-by-id :jp/maff-wildlife)
+          evidence [:harvest-license-record :quota-allocation-record :harvest-tag-record
+                    :species-identification-log :location-log :report-submission-record]]
+      (is (true? (facts/required-evidence-satisfied? j evidence)))))
+
+  (testing "incomplete evidence fails"
+    (let [j (facts/jurisdiction-by-id :jp/maff-wildlife)
+          evidence [:harvest-license-record :quota-allocation-record]]
+      (is (false? (facts/required-evidence-satisfied? j evidence)))))
+
+  (testing "raw jurisdiction id call convention also works"
+    (let [evidence [:harvest-license-record :quota-allocation-record :harvest-tag-record
+                    :species-identification-log :location-log :report-submission-record]]
+      (is (true? (facts/required-evidence-satisfied? :us/usfws evidence)))))
+
+  (testing "unknown jurisdiction never satisfies"
+    (is (false? (facts/required-evidence-satisfied? :xx/unknown [])))))

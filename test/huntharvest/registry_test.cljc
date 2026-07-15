@@ -1,0 +1,78 @@
+(ns huntharvest.registry-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [huntharvest.registry :as registry]))
+
+;; ──────────────────────── Hunter License ──────────────────────
+
+(deftest hunter-license-expired-test
+  (testing "expiry in the future returns false (no violation)"
+    (is (false? (registry/hunter-license-expired? 2000 1000))))
+
+  (testing "expiry exactly now returns false"
+    (is (false? (registry/hunter-license-expired? 1000 1000))))
+
+  (testing "expiry in the past returns true (violation)"
+    (is (true? (registry/hunter-license-expired? 500 1000)))))
+
+;; ──────────────────────── Trap Inspection ──────────────────────
+
+(deftest trap-inspection-overdue-test
+  (testing "recent inspection returns false (no violation)"
+    (let [now 1000000000
+          ten-days-ago (- now (* 10 24 60 60 1000))]
+      (is (false? (registry/trap-inspection-overdue? ten-days-ago now)))))
+
+  (testing "overdue inspection returns true (violation)"
+    (let [now 1000000000
+          two-hundred-days-ago (- now (* 200 24 60 60 1000))]
+      (is (true? (registry/trap-inspection-overdue? two-hundred-days-ago now))))))
+
+;; ──────────────────────── Trap-Check Interval ──────────────────────
+
+(deftest trap-check-interval-violated-test
+  (testing "hours-since-last-check at interval returns false (no violation)"
+    (is (false? (registry/trap-check-interval-violated? 24 24))))
+
+  (testing "hours-since-last-check below interval returns false"
+    (is (false? (registry/trap-check-interval-violated? 10 24))))
+
+  (testing "hours-since-last-check above interval returns true (violation)"
+    (is (true? (registry/trap-check-interval-violated? 30 24)))))
+
+;; ──────────────────────── Trap Setback ──────────────────────
+
+(deftest trap-setback-violated-test
+  (testing "setback at or above minimum returns false (no violation)"
+    (is (false? (registry/trap-setback-violated? 30.0 30.0)))
+    (is (false? (registry/trap-setback-violated? 50.0 30.0))))
+
+  (testing "setback below minimum returns true (violation)"
+    (is (true? (registry/trap-setback-violated? 10.0 30.0)))))
+
+;; ──────────────────────── Quota ──────────────────────
+
+(deftest quota-exceeded-test
+  (testing "harvest count strictly below quota returns false (no violation)"
+    (is (false? (registry/quota-exceeded? 2 5))))
+
+  (testing "harvest count at quota returns true (violation)"
+    (is (true? (registry/quota-exceeded? 5 5))))
+
+  (testing "harvest count above quota returns true (violation)"
+    (is (true? (registry/quota-exceeded? 7 5)))))
+
+;; ──────────────────────── Open Season ──────────────────────
+
+(deftest season-closed-test
+  (testing "harvest within the season window returns false (no violation)"
+    (is (false? (registry/season-closed? 1500 1000 2000))))
+
+  (testing "harvest before season open returns true (violation)"
+    (is (true? (registry/season-closed? 500 1000 2000))))
+
+  (testing "harvest after season close returns true (violation)"
+    (is (true? (registry/season-closed? 2500 1000 2000))))
+
+  (testing "harvest exactly at season boundaries returns false"
+    (is (false? (registry/season-closed? 1000 1000 2000)))
+    (is (false? (registry/season-closed? 2000 1000 2000)))))

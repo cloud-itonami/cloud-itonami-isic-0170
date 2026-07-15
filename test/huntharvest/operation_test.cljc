@@ -1,0 +1,154 @@
+(ns huntharvest.operation-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [huntharvest.operation :as operation]
+            [huntharvest.governor :as governor]))
+
+(def ^:private now-ms #?(:clj (System/currentTimeMillis) :cljs (.now js/Date)))
+(def ^:private ten-days-ago (- now-ms (* 10 24 60 60 1000)))
+(def ^:private ten-days-from-now (+ now-ms (* 10 24 60 60 1000)))
+
+(def ^:private clean-trap-order
+  {:harvest-method :trap/leg-hold-fur-bearer
+   :jurisdiction :jp/maff-wildlife
+   :species "marten"
+   :hunter-license-expiry-date ten-days-from-now
+   :trap-last-inspection-date ten-days-ago
+   :hours-since-last-trap-check 10
+   :trap-setback-actual-m 40.0
+   :harvest-count-this-season 2
+   :quota-limit 5
+   :harvest-epoch-ms 1500
+   :season-open-epoch-ms 1000
+   :season-close-epoch-ms 2000
+   :evidence-checklist [:harvest-license-record :quota-allocation-record :harvest-tag-record
+                        :species-identification-log :location-log :report-submission-record]})
+
+(deftest run-operation-commit-test
+  (testing "clean, non-actuation proposal commits with no hold facts"
+    (let [store {:harvest-records {"record-001" clean-trap-order}}
+          request {:op :schedule-harvest-operation :subject "record-001"}
+          proposal {:cites [{:spec "Field-Schedule"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :propose
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (true? (:ok? result)))
+      (is (= [] (:facts result))))))
+
+(deftest run-operation-hold-test
+  (testing "hard-violating proposal (already-logged record) produces a hold fact"
+    (let [store {:harvest-records {"record-002" {:harvest-method :trap/leg-hold-fur-bearer
+                                                   :logged? true}}}
+          request {:op :log-harvest-record :subject "record-002"}
+          proposal {:cites [{:spec "ISO-12345"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :propose
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (= 1 (count (:facts result))))
+      (is (= :governor-hold (:t (first (:facts result)))))
+      (is (true? (:hard? (:verdict result)))))))
+
+(deftest run-operation-escalate-test
+  (testing "clean but high-stakes proposal is not auto-ok (escalation required)"
+    (let [store {:harvest-records {"record-003" clean-trap-order}}
+          request {:op :log-harvest-record :subject "record-003"}
+          proposal {:cites [{:spec "ISO-12345"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :propose
+                    :confidence 0.95}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (false? (:hard? (:verdict result))))
+      (is (true? (:escalate? (:verdict result))))
+      ;; operation.cljc has a single :ok?/not-ok? gate today; both hard-hold
+      ;; and escalate-only verdicts route through the same hold-fact-fn.
+      ;; Callers distinguish the two by inspecting `(:verdict result)`.
+      (is (= 1 (count (:facts result)))))))
+
+(deftest run-operation-conservation-concern-always-escalates-test
+  (testing "a clean flag-conservation-concern proposal is never auto-ok"
+    (let [store {:harvest-records {"record-004" clean-trap-order}}
+          request {:op :flag-conservation-concern :subject "record-004"}
+          proposal {:cites [{:spec "Field-Report"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :propose
+                    :confidence 0.99}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (false? (:hard? (:verdict result))))
+      (is (true? (:escalate? (:verdict result)))))))
+
+(deftest run-operation-op-not-allowed-test
+  (testing "an out-of-allowlist op (e.g. direct firearm/trap-deployment control) is a hard, permanent block"
+    (let [store {:harvest-records {"record-005" clean-trap-order}}
+          request {:op :discharge-firearm :subject "record-005"}
+          proposal {:cites [{:spec "Firearm-Manual"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :propose
+                    :confidence 0.99}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (true? (:hard? (:verdict result))))
+      (is (some #(= (:rule %) :op-not-allowed) (:violations (:verdict result)))))))
+
+(deftest run-operation-effect-not-propose-test
+  (testing "a proposal asserting a non-:propose effect is a hard, permanent block"
+    (let [store {:harvest-records {"record-006" clean-trap-order}}
+          request {:op :schedule-harvest-operation :subject "record-006"}
+          proposal {:cites [{:spec "Field-Schedule"}]
+                    :value {:jurisdiction :jp/maff-wildlife}
+                    :effect :commit
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (true? (:hard? (:verdict result))))
+      (is (some #(= (:rule %) :effect-not-propose) (:violations (:verdict result)))))))
+
+(deftest run-operation-harvest-record-not-registered-test
+  (testing "any op against a never-registered harvest record is a hard block"
+    (let [store {:harvest-records {}}
+          request {:op :schedule-harvest-operation :subject "record-999"}
+          proposal {:cites []
+                    :value {}
+                    :effect :propose
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (true? (:hard? (:verdict result))))
+      (is (some #(= (:rule %) :harvest-record-not-registered) (:violations (:verdict result)))))))
+
+(deftest run-operation-high-value-shipment-escalates-test
+  (testing "a shipment above the value threshold is not auto-ok"
+    (let [store {:harvest-records {"record-007" clean-trap-order}}
+          request {:op :coordinate-shipment :subject "record-007"}
+          proposal {:cites [{:spec "Shipper-Manifest"}]
+                    :value {:jurisdiction :jp/maff-wildlife :shipment-value-usd 10000}
+                    :effect :propose
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (false? (:ok? result)))
+      (is (false? (:hard? (:verdict result))))
+      (is (true? (:escalate? (:verdict result)))))))
+
+(deftest run-operation-low-value-shipment-commits-test
+  (testing "a shipment at or below the value threshold commits when clean"
+    (let [store {:harvest-records {"record-008" clean-trap-order}}
+          request {:op :coordinate-shipment :subject "record-008"}
+          proposal {:cites [{:spec "Shipper-Manifest"}]
+                    :value {:jurisdiction :jp/maff-wildlife :shipment-value-usd 1000}
+                    :effect :propose
+                    :confidence 0.9}
+          context {:actor-id "op-1" :hold-fact-fn governor/hold-fact}
+          result (operation/run-operation request context proposal store governor/check)]
+      (is (true? (:ok? result)))
+      (is (= [] (:facts result))))))

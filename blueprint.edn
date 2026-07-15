@@ -1,0 +1,47 @@
+{:itonami.blueprint/id "cloud-itonami-isic-0170"
+ :itonami.blueprint/name "Hunting, Trapping And Related Service Activities Coordination"
+ :itonami.blueprint/isic-rev5 "0170"
+ :itonami.blueprint/domain :agriculture/hunting-trapping-services
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:food-security :conservation :wildlife-harvest-safety]
+ :itonami.blueprint/governor :huntharvest-governor
+ :itonami.blueprint/robotics false
+ :itonami.blueprint/required-technologies [:identity :forms :dmn :bpmn :audit-ledger :telemetry]
+ :itonami.blueprint/optional-technologies []
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented
+ :itonami.blueprint/implemented-slice
+ "`:huntharvest-governor` is implemented end-to-end in `src/huntharvest` as
+ a WILDLIFE-HARVEST OPERATIONS COORDINATION actor -- HuntHarvest Advisor
+ (LLM proposal-only) ⊣ Wildlife-Harvest Operations Governor (closed-op-
+ allowlist / harvest-record-registration-before-any-action hard-gate /
+ hunter-license-trap-inspection-trap-check-interval-trap-setback-quota-
+ season hard-gates / unresolved-conservation-flag hard-gate / firearm-
+ trap-deployment-and-licensing-authority permanent block).
+ `:itonami.blueprint/robotics` is honestly `false` -- this actor holds NO
+ firearm/trap-deployment control authority and NO wildlife-license-
+ issuing authority (both are HARD, permanent governor blocks, never
+ overridable by human approval -- see `huntharvest.governor` ns
+ docstring). ISIC Rev.5 0170 covers COMMERCIAL/LICENSED wildlife
+ harvesting for meat, pelts, or population-control purposes, and related
+ service activities (e.g. game-ranching support services) -- this actor
+ coordinates that work on behalf of an independently-verified harvest
+ license and species quota allocation, it never deploys a firearm or trap
+ itself and never issues or finalizes a wildlife harvest license. Every
+ one of its four proposal ops (`:log-harvest-record` /
+ `:schedule-harvest-operation` / `:flag-conservation-concern` /
+ `:coordinate-shipment`) carries `:effect :propose` ONLY -- the governor
+ HARD-holds any proposal that doesn't (`effect-not-propose-violations`).
+ Harvest methods split into trap-based (leg-hold/live-cage trapping,
+ carrying a genuine trap-check interval for humane treatment and a
+ minimum trap setback distance for public safety) and direct-take
+ (rifle/shotgun hunting, no trap to check or set back) -- the Governor's
+ trap-specific checks are skipped entirely, never fabricated, for
+ direct-take methods. Hunter/trapper license currency, species quota, and
+ open-season windows apply to EVERY harvest method regardless of shape.
+ `:flag-conservation-concern` always escalates to a human, at every
+ phase, regardless of advisor confidence; `:coordinate-shipment` above a
+ value threshold likewise always escalates. This build ships NO JVM-only
+ interop anywhere in `src/` (all source is `.cljc`) per this workspace's
+ cljs-first runtime-priority rule. See `README.md` for the full
+ governor-check enumeration."}
