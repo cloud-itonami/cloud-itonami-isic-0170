@@ -1,19 +1,123 @@
 (ns huntharvest.sim
-  "Simulation driver for testing the wildlife-harvest operations actor
-  end-to-end.
+  "Demo driver -- `clojure -M:run` / `clojure -M:dev:run`. Drives the REAL
+  compiled `langgraph-clj` `StateGraph` (`huntharvest.operation/build`)
+  end-to-end through an auto-commit scheduling proposal, an
+  always-escalating harvest-record log (licensed operator approves), an
+  always-escalating harvest-record log (licensed operator rejects), and
+  the HARD governor-block scenarios (out-of-allowlist op, unregistered
+  harvest record), then prints the resulting audit ledger. Mirrors
+  `pastaops.sim` (cloud-itonami-isic-1074) /
+  `forestrysupport.sim` (cloud-itonami-isic-0240).
 
-  For CLI: clojure -M:dev:run
+  FIX: this replaces a stub `-main` that printed \"not yet implemented\"
+  and never called `huntharvest.operation`, `huntharvest.advisor`, or
+  `huntharvest.store` at all."
+  (:require [langgraph.graph :as g]
+            [huntharvest.store :as store]
+            [huntharvest.operation :as operation]))
 
-  Example flow:
-    1. Start with empty store
-    2. Register a harvest record in :intake phase
-    3. Propose a harvest record -> :record transition with safety
-       parameters (hunter license / trap inspection / trap-check
-       interval / trap setback / quota / season window)
-    4. Governor validates parameters against facts
-    5. If valid, audit fact is committed
-    6. CLI prints audit trail")
+(def ^:private now-ms #?(:clj (System/currentTimeMillis) :cljs (.now js/Date)))
+(def ^:private ten-days-ago (- now-ms (* 10 24 60 60 1000)))
+(def ^:private ten-days-from-now (+ now-ms (* 10 24 60 60 1000)))
+
+(def ^:private clean-trap-order
+  "A registered, fully-compliant trap-based harvest record (leg-hold
+  fur-bearer) -- current license/inspection, trap-check interval and
+  setback within range, quota and season clean, evidence checklist
+  complete."
+  {:harvest-method :trap/leg-hold-fur-bearer
+   :jurisdiction :jp/maff-wildlife
+   :species "marten"
+   :hunter-license-expiry-date ten-days-from-now
+   :trap-last-inspection-date ten-days-ago
+   :hours-since-last-trap-check 10
+   :trap-setback-actual-m 40.0
+   :harvest-count-this-season 2
+   :quota-limit 5
+   :harvest-epoch-ms 1500
+   :season-open-epoch-ms 1000
+   :season-close-epoch-ms 2000
+   :evidence-checklist [:harvest-license-record :quota-allocation-record :harvest-tag-record
+                        :species-identification-log :location-log :report-submission-record]})
+
+(defn scenario [title]
+  (println "\n" "=" "=" "=" "=" "=" "=" "=" "=" "=" "=")
+  (println (str "Scenario: " title))
+  (println "=" "=" "=" "=" "=" "=" "=" "=" "=" "="))
+
+(defn- exec-op [actor tid request]
+  (g/run* actor {:request request} {:thread-id tid}))
+
+(defn- approve! [actor tid]
+  (g/run* actor {:approval {:status :approved :by "hunter-op-01"}}
+          {:thread-id tid :resume? true}))
+
+(defn- reject! [actor tid]
+  (g/run* actor {:approval {:status :rejected :by "hunter-op-01"}}
+          {:thread-id tid :resume? true}))
+
+(defn demo
+  "Run the compiled StateGraph through an auto-commit scheduling proposal,
+  an always-escalating harvest-record log (approved, then a separate run
+  rejected), and the HARD-block scenarios (out-of-allowlist op,
+  unregistered harvest record); print each result and the final audit
+  ledger."
+  []
+  (println "Wildlife-Harvest Operations Coordination Actor - Demo")
+
+  (scenario "Clean :schedule-harvest-operation auto-commits (not a high-stakes op)")
+  (let [s (store/mem-store {"record-001" clean-trap-order})
+        actor (operation/build s)
+        result (exec-op actor "t1" {:op :schedule-harvest-operation :subject "record-001"})]
+    (println "Disposition:" (:disposition (:state result)))
+    (println "Ledger:" (store/ledger s)))
+
+  (scenario "Always-escalating: log-harvest-record (licensed operator APPROVES)")
+  (let [s (store/mem-store {"record-002" clean-trap-order})
+        actor (operation/build s)
+        held (exec-op actor "t2" {:op :log-harvest-record :subject "record-002"
+                                  :jurisdiction :jp/maff-wildlife})]
+    (println "Status:" (:status held) "Frontier:" (:frontier held))
+    (println "Ledger while interrupted (must be empty -- not yet committed):" (store/ledger s))
+    (println "-- licensed operator approves --")
+    (let [approved (approve! actor "t2")]
+      (println "Disposition:" (:disposition (:state approved)))
+      (println "record-002 :logged?" (:logged? (store/harvest-record (store/current s) "record-002")))
+      (println "Ledger:" (store/ledger s))))
+
+  (scenario "Always-escalating: log-harvest-record (licensed operator REJECTS)")
+  (let [s (store/mem-store {"record-003" clean-trap-order})
+        actor (operation/build s)
+        _held (exec-op actor "t3" {:op :log-harvest-record :subject "record-003"
+                                   :jurisdiction :jp/maff-wildlife})
+        rejected (reject! actor "t3")]
+    (println "Disposition:" (:disposition (:state rejected)))
+    (println "record-003 :logged? (must stay false -- never committed)"
+             (:logged? (store/harvest-record (store/current s) "record-003")))
+    (println "Ledger:" (store/ledger s)))
+
+  (scenario "HARD-block: out-of-allowlist op (direct firearm/trap-deployment control)")
+  (let [s (store/mem-store {"record-004" clean-trap-order})
+        actor (operation/build s)
+        result (exec-op actor "t4" {:op :discharge-firearm :subject "record-004"})]
+    (println "Disposition:" (:disposition (:state result))
+             "Audit:" (:audit (:state result)))
+    (println "Ledger:" (store/ledger s)))
+
+  (scenario "HARD-block: unregistered harvest record")
+  (let [s (store/mem-store {})
+        actor (operation/build s)
+        result (exec-op actor "t5" {:op :schedule-harvest-operation :subject "record-999"})]
+    (println "Disposition:" (:disposition (:state result))
+             "Audit:" (:audit (:state result)))
+    (println "Ledger:" (store/ledger s)))
+
+  (println "\n" "=" "=" "=" "=" "=" "=" "=" "=" "=" "=")
+  (println "Demo completed successfully")
+  (println "=" "=" "=" "=" "=" "=" "=" "=" "=" "="))
 
 (defn -main [& _args]
-  (println "HuntHarvest simulation: not yet implemented.")
-  (println "TODO: integrate langgraph-clj StateGraph when available."))
+  (demo))
+
+(comment
+  (demo))
