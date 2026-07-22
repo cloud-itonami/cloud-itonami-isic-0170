@@ -40,8 +40,28 @@
       commits
     - :shipped? true once a `:coordinate-shipment` proposal commits
 
-  The ledger (`:facts`) is a separate append-only vector of audit facts,
-  kept alongside `:harvest-records` in the same store value.")
+  The ledger (`:facts` for the pure layer, `ledger`/`append-ledger!` for
+  the `Store` layer below) is a separate append-only vector of audit
+  facts, kept alongside `:harvest-records` in the same store value.
+
+  Two layers:
+
+    1. PURE VALUE HELPERS (below, unchanged by this fix) -- plain
+       functions over an immutable `{:harvest-records {...} :facts [...]}`
+       value. `huntharvest.governor`'s independent checks call these
+       directly against whatever snapshot they're handed (a raw test
+       fixture map, or `(current store)` below) -- this is this actor's
+       original seam and stays unchanged so the Governor never has to
+       care whether it's looking at a plain map or a live `Store`.
+
+    2. `Store` PROTOCOL -- the backend seam every other cloud-itonami
+       actor in this fleet uses (mirrors `forestrysupport.store`,
+       cloud-itonami-isic-0240): `MemStore` (atom, deterministic default
+       for dev/tests/demo). Holds the SAME `{:harvest-records {...}
+       :facts [...]}` shape the pure helpers above expect (`current`
+       returns it) -- this actor's core missing plumbing until now, since
+       there was no real `:commit`/`:hold` graph node to hold a mutable
+       SSoT instance across a human-in-the-loop resume.")
 
 (defn harvest-record
   "Retrieve a harvest record by id, or nil if it does not exist / is not
@@ -90,3 +110,54 @@
   "Append `fact` to the store's audit ledger."
   [st fact]
   (update st :facts (fnil conj []) fact))
+
+;; ----------------------------- Stateful actor-facing wrapper -----------------------------
+
+(defprotocol Store
+  (current [s]
+    "Current plain-map store value (`{:harvest-records .. :facts ..}`) --
+    pass this to the pure read functions above / `huntharvest.advisor`/
+    `huntharvest.governor`.")
+  (commit-log-harvest-record! [s harvest-record-id record-data]
+    "Apply a committed `:log-harvest-record` proposal -- delegates to
+    `log-harvest-record` above.")
+  (commit-schedule! [s harvest-record-id]
+    "Apply a committed `:schedule-harvest-operation` proposal -- delegates
+    to `mark-scheduled` above.")
+  (commit-ship! [s harvest-record-id]
+    "Apply a committed `:coordinate-shipment` proposal -- delegates to
+    `mark-shipped` above.")
+  (ledger [s] "The append-only immutable decision-fact log.")
+  (append-ledger! [s fact]
+    "Append one immutable decision fact -- delegates to `append-fact`
+    above. Returns `fact`. THIS is the call that was previously reachable
+    ONLY from `test/huntharvest/store_test.cljc` -- never from any real
+    execution path, since `huntharvest.operation` had no real `:commit`/
+    `:hold` node -- fixed by wiring it into
+    `huntharvest.operation/build`'s compiled StateGraph."))
+
+(defrecord MemStore [a]
+  Store
+  (current [_] @a)
+  (commit-log-harvest-record! [_ harvest-record-id record-data]
+    (swap! a log-harvest-record harvest-record-id record-data)
+    nil)
+  (commit-schedule! [_ harvest-record-id]
+    (swap! a mark-scheduled harvest-record-id)
+    nil)
+  (commit-ship! [_ harvest-record-id]
+    (swap! a mark-shipped harvest-record-id)
+    nil)
+  (ledger [_] (audit-trail @a))
+  (append-ledger! [_ fact]
+    (swap! a append-fact fact)
+    fact))
+
+(defn mem-store
+  "A `MemStore` seeded with an explicit `harvest-records` map
+  (harvest-record-id string -> harvest-record map). `harvest-records` may
+  be empty (an unregistered-everywhere store) -- the deterministic
+  default for dev/tests/demo (no external deps)."
+  ([] (mem-store {}))
+  ([harvest-records]
+   (->MemStore (atom {:harvest-records harvest-records :facts []}))))

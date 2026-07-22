@@ -20,7 +20,7 @@ cd cloud-itonami-isic-0170
 ## 2. Run tests
 
 ```bash
-clojure -M:test
+clojure -M:dev:test
 ```
 
 Expect green if maturity is `implemented`. Fix failures before operating.
@@ -36,8 +36,12 @@ Publish: enable GitHub Pages on `main` `/docs`, or any static host.
 ## 4. Where the Governor sits
 
 - Blueprint governor key: `huntharvest-governor`
-- Likely source path: `huntharvest.governor.cljc`
-- Pattern: advise → govern → phase-gate → commit | escalate | hold (itonami actor / ADR-2607011000)
+- Source path: `src/huntharvest/governor.cljc`
+- Pattern: a real compiled `langgraph-clj` StateGraph
+  (`huntharvest.operation/build`): intake → advise → govern → decide →
+  commit | request-approval → commit | hold (itonami actor /
+  ADR-2607011000), `interrupt-before` + checkpoint-based resume for
+  genuine human-in-the-loop escalation
 
 ## 5. Claim / go-live
 

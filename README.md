@@ -2,7 +2,9 @@
 
 **ISIC Rev. 5 0170** — Hunting, trapping and related service activities
 
-A distributed actor for autonomous, compliant coordination of commercial/licensed wildlife-harvest operations: harvest-request intake → wildlife-population/habitat-condition survey → harvest/trapping-scheduling advice → licensed hunting/trapping field operation → harvest-record logging → compliance audit. Sealed LLM advisor; independent Governor enforcement; append-only audit ledger. **Not firearm/trap-deployment authority. Not a wildlife-license-issuing authority.** Discharging a firearm or deploying a trap remains exclusive to the licensed hunter/trapper in the field, and this actor never issues or finalizes a wildlife harvest license.
+A distributed actor for autonomous, compliant coordination of commercial/licensed wildlife-harvest operations: harvest-request intake → wildlife-population/habitat-condition survey → harvest/trapping-scheduling advice → licensed hunting/trapping field operation → harvest-record logging → compliance audit. Sealed LLM advisor (`huntharvest.advisor/Advisor`); independent Governor enforcement (`huntharvest.governor`); append-only audit ledger. Composed by `huntharvest.operation/build` into a REAL compiled `langgraph-clj` `StateGraph` (`intake -> advise -> govern -> decide -+-> commit / request-approval -> commit / hold`), with `interrupt-before #{:request-approval}` + checkpoint-based resume for genuine human-in-the-loop escalation. **Not firearm/trap-deployment authority. Not a wildlife-license-issuing authority.** Discharging a firearm or deploying a trap remains exclusive to the licensed hunter/trapper in the field, and this actor never issues or finalizes a wildlife harvest license.
+
+Fixed a prior gap worse than most sibling cloud-itonami-isic-* actors before their own fixes: `deps.edn` declared `io.github.kotoba-lang/langgraph` ONLY under the unused `:dev` alias's `:override-deps`, with an EMPTY base `:deps` map, so `langgraph.graph` was never actually resolvable on any real build/run/test path; `huntharvest.advisor` was a docstring-only namespace admitting "it's a skeleton" — literally ZERO functions, no protocol, no implementation, never `:require`d anywhere; and `huntharvest.store/append-fact` was called ONLY from test setup, never from any real commit/hold path. `huntharvest.advisor/Advisor` is now a genuine `defprotocol` + `MockAdvisor`, sealed into the graph's `:advise` node, and `huntharvest.store` now also exposes a `Store` protocol (`MemStore`, `ledger`/`append-ledger!`) alongside its original pure value helpers (unchanged, still used directly by the Governor and by the original `run-operation` pure driver, preserved for its own 9 existing tests).
 
 ## Scope
 
@@ -62,14 +64,14 @@ Any proposal for an operation outside this allowlist — most importantly anythi
 ## Testing
 
 ```bash
-# Run full test suite
-clojure -M:test
+# Run full test suite (langgraph resolved via local sibling checkout)
+clojure -M:dev:test
 
 # Check code quality
 clojure -M:lint
 
-# Run demo simulation
-clojure -M:run
+# Run demo simulation -- drives the compiled StateGraph end-to-end
+clojure -M:dev:run
 ```
 
 ## Standalone Use
