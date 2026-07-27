@@ -343,6 +343,31 @@
       (is (true? (:escalate? result)))
       (is (false? (:hard? result)))))
 
+
+;; ──────────── The threshold gate must not read the number it doubts ────────────
+
+(deftest threshold-gate-fails-safe-when-the-value-is-unverifiable
+  (testing "`(some-> v (> threshold))` returned nil when `shipment-value-usd` was ABSENT,
+            so a proposal carrying no figure at all skipped the gate entirely"
+    (let [store {:harvest-records {"record-001" clean-trap-order}}
+          req {:op :coordinate-shipment :subject "record-001"}
+          prop {:cites [{:spec "Shipper-Manifest"}]
+                :value {:jurisdiction :jp/maff-wildlife}
+                :confidence 0.99}
+          result (governor/check req {:actor-id "gov-1"} prop store)]
+      (is (false? (:ok? result)))
+      (is (true? (:escalate? result)))))
+
+  (testing "a non-numeric figure escalates rather than being compared"
+    (doseq [bad ["10000" :unknown {}]]
+      (let [store {:harvest-records {"record-001" clean-trap-order}}
+            req {:op :coordinate-shipment :subject "record-001"}
+            prop {:cites [{:spec "Shipper-Manifest"}]
+                  :value {:jurisdiction :jp/maff-wildlife :shipment-value-usd bad}
+                  :confidence 0.99}
+            result (governor/check req {:actor-id "gov-1"} prop store)]
+        (is (false? (:ok? result))
+            (str "non-numeric " (pr-str bad) " must escalate, not slip through"))))))
   (testing "a shipment at or below the value threshold does not force escalation"
     (let [store {:harvest-records {"record-002" clean-trap-order}}
           req {:op :coordinate-shipment :subject "record-002"}
