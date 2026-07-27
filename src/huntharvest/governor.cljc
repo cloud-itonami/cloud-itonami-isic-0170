@@ -341,14 +341,31 @@
      :cljs (js/Date.now)))
 
 (defn- high-value-shipment?
-  "Soft-gate helper: a pelt/meat/carcass shipment (`:coordinate-
-  shipment`) whose declared value exceeds `shipment-value-threshold-usd`
-  always requires human sign-off, even when the Governor's hard checks
-  are clean and confidence is high."
+  "Soft-gate helper: a `:coordinate-shipment` proposal escalates to a human
+  unless its `:shipment-value-usd` can be established to be BELOW `shipment-value-threshold-usd`.
+
+  Note the direction. This gate used to read `:shipment-value-usd` out of the
+  advisor's OWN proposal and escalate only when that number exceeded
+  the threshold, which made the gate's only input the very number it
+  existed to doubt:
+
+    - an advisor understating bought itself an auto-commit wherever
+      `:coordinate-shipment` was `:auto`-eligible -- no human saw it;
+    - `(some-> amount (> threshold))` returned nil when the field was
+      ABSENT, so omitting `:shipment-value-usd` skipped the gate entirely.
+
+  There is no filed catalog in this actor's store to recompute the
+  figure from -- the advisor states it directly -- so a self-declared
+  value cannot be verified. An unverifiable number is worthless as a
+  DE-escalation signal: it may raise the alarm, it must never silence
+  it. The gate now escalates whenever the value is absent, non-numeric,
+  or above the threshold, and stands down only for one that is present,
+  numeric and below it."
   [{:keys [op]} proposal]
-  (and (= op :coordinate-shipment)
-       (some-> (get-in proposal [:value :shipment-value-usd])
-               (> shipment-value-threshold-usd))))
+  (when (= op :coordinate-shipment)
+    (let [v (get-in proposal [:value :shipment-value-usd])]
+      (or (not (number? v))
+          (> v shipment-value-threshold-usd)))))
 
 (defn check
   "Censors a HuntHarvestAdvisor proposal against the Governor rules.
