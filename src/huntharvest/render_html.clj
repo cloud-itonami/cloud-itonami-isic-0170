@@ -1,0 +1,679 @@
+(ns huntharvest.render-html
+  "Build-time HTML renderer for `docs/samples/operator-console.html`.
+
+  Closes flagship checklist item 2 for this repo: there was no demo page
+  and no generator here at all. This namespace drives the REAL actor
+  stack -- `huntharvest.operation/build`'s compiled `langgraph-clj`
+  StateGraph (`:intake -> :advise -> :govern -> :decide -+-> :commit /
+  :request-approval -> :commit / :hold`), the independent
+  `huntharvest.governor`, and a live `huntharvest.store/mem-store` --
+  and renders what actually came back. Nothing on the page is typed by
+  hand: every id, species, method name, jurisdiction, quantity, verdict,
+  hold reason and ledger row below is read out of the seeded store or
+  out of real graph/governor output.
+
+  Provenance of the seed. This repo has no `store/demo-data`; its only
+  seed is the record its own demo driver uses, so the base record here
+  IS that value -- `huntharvest.sim/clean-trap-order`, read through its
+  var rather than retyped, so this page cannot silently drift from the
+  demo driver (`clojure -M:dev:run`). Every variant is that same value
+  with ONE field changed to trip exactly ONE governor rule, and every
+  enum (harvest method, jurisdiction, evidence item) is looked up in
+  `huntharvest.facts` rather than spelled out.
+
+  Determinism. Byte-identical across reruns: no timestamp is written
+  into the page, scenarios execute in a fixed order, records render in
+  sorted id order, and the two governor checks that consult the host
+  clock (`hunter-license-expired?`, `trap-inspection-overdue?`) are fed
+  either fixed epoch constants far outside any plausible run window or
+  the sim's own relative values -- and their raw epochs are NEVER
+  rendered, only the derived pass/fail their own predicates in
+  `huntharvest.facts` report.
+
+  Usage: `clojure -M:dev:render-html [out-file]`
+  (default `docs/samples/operator-console.html`)."
+  (:require [clojure.string :as str]
+            [huntharvest.advisor :as advisor]
+            [huntharvest.facts :as facts]
+            [huntharvest.governor :as governor]
+            [huntharvest.operation :as operation]
+            [huntharvest.sim]
+            [huntharvest.store :as store]
+            [jp-go-dds.skin]
+            [langgraph.graph :as g]))
+
+;; ----------------------------- seed -----------------------------
+
+(def ^:private clean-trap-order
+  "This repo's own demo seed, read through the var so the console and
+  `clojure -M:dev:run` can never disagree about what a clean,
+  fully-compliant trap-based harvest record looks like."
+  @#'huntharvest.sim/clean-trap-order)
+
+(def ^:private long-expired-epoch-ms
+  "2000-01-01T00:00:00Z. Used ONLY as a deliberately-expired license /
+  deliberately-overdue trap inspection: far enough in the past that
+  `registry/hunter-license-expired?` and
+  `registry/trap-inspection-overdue?` return the same verdict no matter
+  when this generator runs -- which is what keeps the page byte-stable
+  even though those two checks read the host clock."
+  946684800000)
+
+(def ^:private operator-id
+  "The licensed operator identity the demo driver signs off as."
+  "hunter-op-01")
+
+(defn- evidence-for
+  "The jurisdiction's OWN required-evidence list, straight out of
+  `huntharvest.facts` -- never a retyped literal."
+  [jurisdiction-id]
+  (vec (:required-evidence (facts/jurisdiction-by-id jurisdiction-id))))
+
+(def ^:private seed-records
+  "One registered harvest record per governor rule under test, each the
+  clean seed with ONE field changed, plus clean records for the commit
+  paths. `record-999` is deliberately absent -- an unregistered subject
+  is itself one of the HARD holds."
+  (let [clean clean-trap-order]
+    {"record-001" clean
+     "record-002" clean
+     "record-003" clean
+     "record-004" (assoc clean :hunter-license-expiry-date long-expired-epoch-ms)
+     "record-005" (assoc clean :hours-since-last-trap-check 48)
+     "record-006" (assoc clean
+                         :harvest-method :trap/live-cage-predator-control
+                         :species "raccoon dog"
+                         :trap-setback-actual-m 10.0)
+     "record-007" (assoc clean :harvest-count-this-season 5)
+     "record-008" (assoc clean :harvest-epoch-ms 2500)
+     "record-009" (assoc clean
+                         :conservation-concern-raised? true
+                         :conservation-concern-resolved? false)
+     "record-010" (assoc clean :evidence-checklist
+                         (vec (butlast (evidence-for :jp/maff-wildlife))))
+     "record-011" (assoc clean :trap-last-inspection-date long-expired-epoch-ms)
+     "record-012" (assoc clean
+                         :harvest-method :hunt/big-game-rifle
+                         :species "sika deer"
+                         :trap-last-inspection-date nil
+                         :hours-since-last-trap-check nil
+                         :trap-setback-actual-m nil)
+     "record-013" clean}))
+
+;; ----------------------------- probe advisors -----------------------------
+;;
+;; Two governor rules -- the permanent scope block and the
+;; effect-not-propose invariant -- exist precisely to survive an advisor
+;; that misbehaves, and `advisor/MockAdvisor` never misbehaves (by
+;; construction; see its docstring). They are therefore unreachable
+;; through the mock, and an unexercised block is an unproven block. The
+;; Advisor is an injected protocol (`operation/build` `:advisor`), so
+;; these drive the SAME compiled graph and the SAME governor through the
+;; real injection point -- no rule here is stubbed or simulated.
+
+(defrecord ^:private CovertFirearmAdvisor []
+  advisor/Advisor
+  (-advise [_ _store request]
+    {:op (:op request)
+     :effect :propose
+     :value {:jurisdiction (:jurisdiction request)
+             :operate-firearm-or-trap-deployment? true}
+     :cites [{:spec (str (:subject request) "-harvest-license-record")}]
+     :summary "Covert direct firearm/trap-deployment control request (adversarial advisor probe)"
+     :confidence 0.99}))
+
+(defrecord ^:private ClaimsExecuteAdvisor []
+  advisor/Advisor
+  (-advise [_ _store request]
+    {:op (:op request)
+     :effect :execute
+     :value {:jurisdiction (:jurisdiction request)}
+     :cites [{:spec (str (:subject request) "-harvest-license-record")}]
+     :summary "Proposal claiming direct write authority (adversarial advisor probe)"
+     :confidence 0.99}))
+
+(def ^:private advisor-labels
+  {:mock            "MockAdvisor"
+   :covert-firearm  "probe: covert firearm/trap-deployment request"
+   :claims-execute  "probe: claims :effect :execute"})
+
+;; ----------------------------- scenarios -----------------------------
+
+(def ^:private scenarios
+  "Fixed execution order -- the ledger below is an append-only log, so
+  this order IS the page. Each entry is one graph run (plus, where the
+  Governor escalates, one resume carrying the operator's decision)."
+  [{:tid "s01" :advisor :mock :approval nil
+    :note "Clean scheduling proposal -- not a high-stakes op, Governor clean, no human needed"
+    :request {:op :schedule-harvest-operation :subject "record-001"
+              :harvest-method :trap/leg-hold-fur-bearer}}
+
+   {:tid "s02" :advisor :mock :approval :approved
+    :note "The one real actuation event -- always escalates, operator signs off"
+    :request {:op :log-harvest-record :subject "record-002"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s03" :advisor :mock :approval :approved
+    :note "Same record logged a second time -- double-commit guard fires before any human is asked"
+    :request {:op :log-harvest-record :subject "record-002"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s04" :advisor :mock :approval :rejected
+    :note "Escalated, operator REJECTS -- a human hold, not a Governor hold"
+    :request {:op :log-harvest-record :subject "record-003"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s05" :advisor :mock :approval :approved
+    :note "Conservation concern -- never auto-resolved by advisor confidence"
+    :request {:op :flag-conservation-concern :subject "record-012"
+              :jurisdiction :jp/maff-wildlife
+              :concern "quota exceedance observed in the field"}}
+
+   {:tid "s06" :advisor :mock :approval nil
+    :note "Shipment at or below the value threshold -- auto-commit"
+    :request {:op :coordinate-shipment :subject "record-001"
+              :jurisdiction :jp/maff-wildlife :shipment-value-usd 1200}}
+
+   {:tid "s07" :advisor :mock :approval :approved
+    :note "Shipment above the value threshold -- human sign-off"
+    :request {:op :coordinate-shipment :subject "record-001"
+              :jurisdiction :jp/maff-wildlife :shipment-value-usd 9000}}
+
+   {:tid "s08" :advisor :mock :approval nil
+    :note "Shipment with NO declared value in the request -- see the integrity checks below"
+    :request {:op :coordinate-shipment :subject "record-001"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s09" :advisor :mock :approval nil
+    :note "No jurisdiction citation"
+    :request {:op :log-harvest-record :subject "record-013"}}
+
+   {:tid "s10" :advisor :mock :approval nil
+    :note "Hunter/trapper harvest license expired"
+    :request {:op :log-harvest-record :subject "record-004"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s11" :advisor :mock :approval nil
+    :note "Trap unchecked past the method's mandated interval (humane treatment)"
+    :request {:op :log-harvest-record :subject "record-005"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s12" :advisor :mock :approval nil
+    :note "Trap set closer than the method's minimum setback (public safety)"
+    :request {:op :log-harvest-record :subject "record-006"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s13" :advisor :mock :approval nil
+    :note "Species quota allocation already reached"
+    :request {:op :log-harvest-record :subject "record-007"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s14" :advisor :mock :approval nil
+    :note "Harvest occurred outside the legal open season"
+    :request {:op :log-harvest-record :subject "record-008"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s15" :advisor :mock :approval nil
+    :note "Conservation concern raised and still unresolved"
+    :request {:op :log-harvest-record :subject "record-009"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s16" :advisor :mock :approval nil
+    :note "Jurisdiction evidence checklist incomplete"
+    :request {:op :log-harvest-record :subject "record-010"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s17" :advisor :mock :approval nil
+    :note "Trap/cage inspection and tag registration overdue"
+    :request {:op :log-harvest-record :subject "record-011"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s18" :advisor :mock :approval nil
+    :note "Subject never registered in the store"
+    :request {:op :schedule-harvest-operation :subject "record-999"}}
+
+   {:tid "s19" :advisor :mock :approval nil
+    :note "Operation outside the closed allowlist -- direct firearm discharge"
+    :request {:op :discharge-firearm :subject "record-001"}}
+
+   {:tid "s20" :advisor :covert-firearm :approval :approved
+    :note "Allowed op, but the advisor covertly asks for firearm/trap-deployment control"
+    :request {:op :log-harvest-record :subject "record-001"
+              :jurisdiction :jp/maff-wildlife}}
+
+   {:tid "s21" :advisor :claims-execute :approval :approved
+    :note "Advisor claims direct write authority instead of :propose"
+    :request {:op :log-harvest-record :subject "record-001"
+              :jurisdiction :jp/maff-wildlife}}])
+
+(defn- run-scenario!
+  "One graph run, plus a resume carrying the operator's decision when
+  (and only when) the Governor actually interrupted for a human. Returns
+  the scenario augmented with the real run results."
+  [actors {:keys [tid advisor approval request] :as sc}]
+  (let [actor (get actors advisor)
+        first-run (g/run* actor {:request request} {:thread-id tid})
+        resumed (when (and approval (= :interrupted (:status first-run)))
+                  (g/run* actor {:approval {:status approval :by operator-id}}
+                          {:thread-id tid :resume? true}))
+        final (or resumed first-run)]
+    (assoc sc
+           :interrupted? (= :interrupted (:status first-run))
+           :resumed? (some? resumed)
+           :state (:state final))))
+
+(defn run-demo!
+  "Drives every scenario above through ONE shared store, so the audit
+  ledger the page renders is a single append-only log across all runs.
+  Returns `{:store .. :runs [..]}` -- everything the renderer prints is
+  read back out of these two values."
+  []
+  (let [st (store/mem-store seed-records)
+        actors {:mock           (operation/build st)
+                :covert-firearm (operation/build st {:advisor (->CovertFirearmAdvisor)})
+                :claims-execute (operation/build st {:advisor (->ClaimsExecuteAdvisor)})}]
+    {:store st
+     :runs (mapv (partial run-scenario! actors) scenarios)}))
+
+;; ----------------------------- derivations -----------------------------
+
+(defn- hard-rules
+  "The HARD (un-overridable) rules the Governor actually returned for a
+  run, in the Governor's own order."
+  [run]
+  (mapv :rule (get-in run [:state :verdict :violations])))
+
+(defn- disposition [run] (get-in run [:state :disposition]))
+
+(defn- audit-types [run] (mapv :t (get-in run [:state :audit])))
+
+(defn- approved-by-in-graph
+  "The approver the graph put on the commit payload, if any. This is
+  read from the `:record` channel `:request-approval` populated -- NOT
+  assumed from the scenario -- so it is nil whenever no human actually
+  signed off."
+  [run]
+  (get-in run [:state :record :payload :approved-by]))
+
+(defn- hard-hold-facts
+  "Persisted HARD holds. `:t :governor-hold` is precisely the
+  un-overridable set: a human rejection lands as `:approval-rejected`."
+  [ledger]
+  (filterv #(= :governor-hold (:t %)) ledger))
+
+(defn- committed-fact-for
+  "The persisted `:committed` ledger fact a run produced, matched on op
+  and subject."
+  [ledger run]
+  (last (filter #(and (= :committed (:t %))
+                      (= (get-in run [:request :op]) (:op %))
+                      (= (get-in run [:request :subject]) (:subject %)))
+                ledger)))
+
+(defn- approver-persisted?
+  "Does the approver survive into the persisted ledger fact? Derived by
+  searching the fact the store actually kept for the operator identity
+  the graph recorded -- so this flips on its own the day the commit path
+  starts carrying the approval payload."
+  [fact approver]
+  (boolean (and fact approver (str/includes? (pr-str fact) (str approver)))))
+
+(defn- approval-rows
+  "One row per run where a human actually signed off in the graph."
+  [ledger runs]
+  (for [r runs
+        :let [approver (approved-by-in-graph r)]
+        :when approver
+        :let [fact (committed-fact-for ledger r)]]
+    {:tid (:tid r)
+     :op (get-in r [:request :op])
+     :subject (get-in r [:request :subject])
+     :approver approver
+     :fact fact
+     :persisted? (approver-persisted? fact approver)}))
+
+(defn- shipment-rows
+  "One row per shipment run, comparing the value the REQUEST declared
+  with the value the advisor's proposal carried into the Governor's
+  threshold gate. A gate that can only ever see a number the advisor
+  supplied is measured here, not asserted."
+  [runs]
+  (for [r runs
+        :when (= :coordinate-shipment (get-in r [:request :op]))]
+    (let [declared (get-in r [:request :shipment-value-usd])
+          proposed (get-in r [:state :proposal :value :shipment-value-usd])]
+      {:tid (:tid r)
+       :declared declared
+       :proposed proposed
+       :substituted? (and (nil? declared) (some? proposed))
+       :disposition (disposition r)
+       :escalated? (:interrupted? r)})))
+
+;; ----------------------------- html -----------------------------
+
+(defn- esc [v]
+  (-> (str v)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- kw [v] (str "<code>" (esc (if (keyword? v) (str v) v)) "</code>"))
+
+(defn- flag [ok? yes no]
+  (format "<span class=\"%s\">%s</span>" (if ok? "ok" "critical") (esc (if ok? yes no))))
+
+(defn- na [] "<span class=\"muted\">n/a</span>")
+
+(defn- basis-str
+  "Ledger `:basis` is rule keywords on a hold and the proposal's
+  `:cites` maps on a commit -- render both without inventing either."
+  [basis]
+  (cond
+    (empty? basis) ""
+    (map? (first basis)) (str/join ", " (map #(str (:spec %)) basis))
+    :else (str/join ", " (map name basis))))
+
+(defn- record-row [now-ms [id r]]
+  (let [hm (facts/harvest-method-by-id (:harvest-method r))
+        trap? (true? (:trap-based? hm))
+        required (evidence-for (:jurisdiction r))
+        present (count (filter (set (:evidence-checklist r)) required))]
+    (format (str "        <tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td>"
+                 "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class=\"num\">%s</td>"
+                 "<td>%s</td><td class=\"num\">%s</td><td>%s</td></tr>")
+            (esc id)
+            (esc (:species r))
+            (esc (:name hm))
+            (if trap? "<span class=\"muted\">trap</span>" "<span class=\"muted\">direct-take</span>")
+            (flag (facts/hunter-license-current? (:hunter-license-expiry-date r) now-ms)
+                  "current" "EXPIRED")
+            (if-not trap?
+              (na)
+              (flag (facts/trap-inspection-current? (:trap-last-inspection-date r) now-ms hm)
+                    "current" "OVERDUE"))
+            (if-not (:trap-check-interval-hours hm)
+              (na)
+              (flag (facts/trap-check-interval-satisfied? (:hours-since-last-trap-check r) hm)
+                    (str (:hours-since-last-trap-check r) "h / " (:trap-check-interval-hours hm) "h")
+                    (str (:hours-since-last-trap-check r) "h / " (:trap-check-interval-hours hm) "h")))
+            (if-not (:min-trap-setback-m hm)
+              (na)
+              (flag (facts/trap-setback-in-range? (:trap-setback-actual-m r) hm)
+                    (str (:trap-setback-actual-m r) "m / " (:min-trap-setback-m hm) "m")
+                    (str (:trap-setback-actual-m r) "m / " (:min-trap-setback-m hm) "m")))
+            (flag (facts/quota-satisfied? (:harvest-count-this-season r) (:quota-limit r))
+                  (str (:harvest-count-this-season r) " / " (:quota-limit r))
+                  (str (:harvest-count-this-season r) " / " (:quota-limit r)))
+            (flag (facts/in-open-season? (:harvest-epoch-ms r)
+                                         (:season-open-epoch-ms r)
+                                         (:season-close-epoch-ms r))
+                  "in season" "CLOSED")
+            (flag (facts/required-evidence-satisfied? (:jurisdiction r) (:evidence-checklist r))
+                  (str present " / " (count required))
+                  (str present " / " (count required)))
+            (str/join " "
+                      (remove nil?
+                              [(when (:logged? r) "<span class=\"ok\">logged</span>")
+                               (when (:scheduled? r) "<span class=\"ok\">scheduled</span>")
+                               (when (:shipped? r) "<span class=\"ok\">shipped</span>")
+                               (when-not (or (:logged? r) (:scheduled? r) (:shipped? r))
+                                 "<span class=\"muted\">no commit</span>")])))))
+
+(defn- gate-row [op]
+  (let [always? (contains? governor/always-escalate-ops op)
+        stakes? (contains? governor/high-stakes op)]
+    (format "        <tr><td>%s</td><td>%s</td><td>%s</td></tr>"
+            (kw op)
+            (cond
+              stakes? "<span class=\"warn\">ALWAYS human sign-off &middot; high-stakes actuation</span>"
+              always? "<span class=\"warn\">ALWAYS human sign-off</span>"
+              (= :coordinate-shipment op)
+              (format "<span class=\"warn\">human sign-off unless the value is present, numeric and at or below %s USD</span>"
+                      governor/shipment-value-threshold-usd)
+              :else "<span class=\"ok\">auto-commit when the Governor is clean</span>")
+            (format "confidence floor %s" governor/confidence-floor))))
+
+(defn- outcome-cell [run]
+  (let [rules (hard-rules run)]
+    (cond
+      (seq rules)
+      (str "<span class=\"critical\">HARD hold</span> &middot; "
+           (str/join ", " (map #(kw %) rules)))
+
+      (= :commit (disposition run))
+      (if (:resumed? run)
+        (format "<span class=\"ok\">approved &amp; committed</span> &middot; by <code>%s</code>"
+                (esc (approved-by-in-graph run)))
+        "<span class=\"ok\">auto-committed</span>")
+
+      (= :hold (disposition run))
+      "<span class=\"warn\">operator rejected</span>"
+
+      :else "<span class=\"muted\">in progress</span>")))
+
+(defn- scenario-row [run]
+  (format (str "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td>"
+               "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>")
+          (esc (:tid run))
+          (kw (get-in run [:request :op]))
+          (esc (get-in run [:request :subject]))
+          (esc (get advisor-labels (:advisor run)))
+          (if (:interrupted? run)
+            "<span class=\"warn\">yes</span>"
+            "<span class=\"muted\">no</span>")
+          (outcome-cell run)
+          (esc (:note run))))
+
+(defn- hard-hold-row [fact]
+  (format "        <tr><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>"
+          (str/join ", " (map #(kw (:rule %)) (:violations fact)))
+          (esc (name (:op fact)))
+          (esc (:subject fact))
+          (esc (str/join " / " (map :detail (:violations fact))))))
+
+(defn- ledger-row [i fact]
+  (format (str "        <tr><td class=\"num\">%s</td><td>%s</td><td><code>%s</code></td>"
+               "<td><code>%s</code></td><td>%s</td><td>%s</td></tr>")
+          (inc i)
+          (let [t (:t fact)]
+            (format "<span class=\"%s\">%s</span>"
+                    (case t :committed "ok" :governor-hold "critical" "warn")
+                    (esc (name t))))
+          (esc (name (:op fact)))
+          (esc (:subject fact))
+          (esc (name (:disposition fact)))
+          (esc (basis-str (:basis fact)))))
+
+(defn- approval-row [{:keys [tid op subject approver persisted?]}]
+  (format "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>"
+          (esc tid) (kw op) (esc subject) (esc approver)
+          (if persisted?
+            "<span class=\"ok\">retained in the committed ledger fact</span>"
+            "<span class=\"critical\">DROPPED &middot; present in the graph payload, absent from the persisted fact</span>")))
+
+(defn- shipment-row [{:keys [tid declared proposed substituted? disposition escalated?]}]
+  (format "        <tr><td><code>%s</code></td><td class=\"num\">%s</td><td class=\"num\">%s</td><td>%s</td><td>%s</td></tr>"
+          (esc tid)
+          (if (some? declared) (esc declared) "<span class=\"muted\">none</span>")
+          (if (some? proposed) (esc proposed) "<span class=\"muted\">none</span>")
+          (if substituted?
+            "<span class=\"critical\">substituted by the advisor</span>"
+            "<span class=\"ok\">declared in the request</span>")
+          (str (if escalated?
+                 "<span class=\"warn\">escalated to a human</span>"
+                 "<span class=\"ok\">no human asked</span>")
+               " &middot; " (esc (name disposition)))))
+
+(defn- integrity-section
+  "Both checks below are MEASURED from the run above and rendered from
+  the measurement, so a fix upstream retires the finding here without
+  anyone editing this file."
+  [ledger runs]
+  (let [arows (vec (approval-rows ledger runs))
+        dropped (filterv (complement :persisted?) arows)
+        srows (vec (shipment-rows runs))
+        substituted (filterv :substituted? srows)
+        silent (filterv #(and (:substituted? %) (not (:escalated? %))) srows)]
+    (str
+     "  <section class=\"card\">\n"
+     "    <h2>Integrity checks (derived from this run)</h2>\n"
+     "    <h3>Does a committed record keep the human who approved it?</h3>\n"
+     "    <p class=\"muted\">Every row is an approval the graph really performed; &quot;retained&quot; is decided by searching the ledger fact the store actually kept for the approver the graph recorded. A record with no human approval never appears here at all, so a dropped approver cannot be mistaken for nobody having approved.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Approver (in graph)</th><th>In the persisted ledger fact</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map approval-row arows)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     (if (seq dropped)
+       (format (str "    <p class=\"critical\">%s of %s human approvals do not survive into the ledger: the commit fact is built from the advisor's proposal <code>:value</code>, while the approver was written to the approval payload alongside it. The audit log therefore records THAT a harvest record was logged, but not WHO authorised it.</p>\n")
+               (count dropped) (count arows))
+       "    <p class=\"ok\">Every human approval in this run survives into the persisted ledger fact.</p>\n")
+     "    <h3>Where does the shipment threshold gate get its number?</h3>\n"
+     "    <p class=\"muted\">The Governor refuses to stand down for a shipment value it cannot establish as present, numeric and below the threshold. This table compares what the request declared with what reached that gate.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Run</th><th>Declared in request (USD)</th><th>Seen by the gate (USD)</th><th>Provenance</th><th>Outcome</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map shipment-row srows)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     (if (seq silent)
+       (format (str "    <p class=\"critical\">%s shipment run(s) auto-committed on a value the request never declared: the advisor supplies its own default when the field is absent, so the number the gate was built to distrust is always present and always low. The Governor's absent/non-numeric fail-safe cannot fire while the advisor fills the field in first.</p>\n")
+               (count silent))
+       (if (seq substituted)
+         "    <p class=\"warn\">A shipment value was substituted by the advisor, but the run still escalated to a human.</p>\n"
+         "    <p class=\"ok\">Every shipment value the gate saw was declared in the request itself.</p>\n"))
+     "  </section>\n")))
+
+(defn render
+  "Renders the whole console from `{:store .. :runs ..}` -- the return
+  value of `run-demo!`."
+  [{:keys [store runs]}]
+  (let [now-ms (System/currentTimeMillis)   ; never rendered; only fed to facts predicates
+        ledger (vec (store/ledger store))
+        records (sort-by key (:harvest-records (store/current store)))
+        hard (hard-hold-facts ledger)]
+    (str
+     "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">"
+     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+     "<title>cloud-itonami-isic-0170 &middot; huntharvest &middot; Operator Console</title><style>"
+     (jp-go-dds.skin/dds+skin)
+     "</style></head><body>\n"
+     "<header class=\"bar\">\n"
+     "  <h1>Hunting, trapping and related service activities (ISIC 0170) — Operator Console</h1>\n"
+     "</header>\n"
+     "<p><span class=\"badge\">read-only sample</span> <span class=\"badge\">governor-gated</span> "
+     "<span class=\"badge\">harvest-record logging always human-approved</span></p>\n"
+     "<p class=\"muted\">Generated at build time by <code>huntharvest.render-html</code> "
+     "(<code>clojure -M:dev:render-html</code>) by running this repo's real actor — the compiled "
+     "<code>langgraph-clj</code> StateGraph in <code>huntharvest.operation</code>, the independent "
+     "<code>huntharvest.governor</code>, and a live <code>huntharvest.store</code>. Every value below "
+     "is read back out of that run. This actor never deploys a firearm or trap and never issues or "
+     "finalizes a wildlife harvest license.</p>\n"
+     "<main>\n"
+
+     ;; 1. seeded records
+     "  <section class=\"card\">\n"
+     "    <h2>Registered harvest records (store snapshot after the run)</h2>\n"
+     "    <p class=\"muted\">Seeded from this repo's own demo record, <code>huntharvest.sim/clean-trap-order</code>; "
+     "each variant changes exactly one field to exercise one Governor rule. Method and jurisdiction "
+     "windows are looked up in <code>huntharvest.facts</code>; every pass/fail below is that namespace's "
+     "own predicate, not a restatement. <code>record-999</code> is deliberately absent.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Record</th><th>Species</th><th>Harvest method</th><th>Shape</th>"
+     "<th>Hunter license</th><th>Trap inspection</th><th>Trap check</th><th>Trap setback</th>"
+     "<th>Quota</th><th>Season</th><th>Evidence</th><th>Commits</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map (partial record-row now-ms) records)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; 2. gate contract
+     "  <section class=\"card\">\n"
+     "    <h2>Action gate (Wildlife-Harvest Operations Governor)</h2>\n"
+     "    <p class=\"muted\">The closed allowlist and thresholds are read from "
+     "<code>huntharvest.governor</code> itself. Anything outside this list — including direct "
+     "firearm/trap deployment — is refused unconditionally, as is any proposal covertly requesting "
+     "firearm/trap-deployment control or a license-issuing decision.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Op</th><th>Gate</th><th>Confidence</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map gate-row (sort-by name governor/allowed-ops))) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; 3. scenario runs
+     "  <section class=\"card\">\n"
+     "    <h2>Graph runs (in execution order)</h2>\n"
+     "    <p class=\"muted\">One row per <code>langgraph.graph/run*</code>. &quot;Interrupted&quot; means the "
+     "compiled graph stopped at <code>:request-approval</code> and waited for a human; a HARD hold never "
+     "gets that far.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Advisor</th><th>Interrupted</th>"
+     "<th>Outcome</th><th>What it demonstrates</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map scenario-row runs)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; 4. hard holds
+     "  <section class=\"card\">\n"
+     "    <h2>HARD holds — un-overridable, no human is asked</h2>\n"
+     "    <p class=\"muted\">Persisted <code>:governor-hold</code> facts. These cannot be approved away: "
+     "the graph routes them straight to <code>:hold</code> without ever reaching "
+     "<code>:request-approval</code>. An operator rejection is a different thing and appears as "
+     "<code>:approval-rejected</code> in the ledger below.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>Rule</th><th>Op</th><th>Subject</th><th>Governor detail</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map hard-hold-row hard)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     ;; 5. integrity checks
+     (integrity-section ledger runs)
+
+     ;; 6. ledger
+     "  <section class=\"card\">\n"
+     "    <h2>Audit ledger (append-only, this run)</h2>\n"
+     "    <p class=\"muted\">Every decision fact <code>huntharvest.store/append-ledger!</code> received, in "
+     "append order, across all runs above — they share one store.</p>\n"
+     "    <table>\n"
+     "      <thead><tr><th>#</th><th>Fact</th><th>Op</th><th>Subject</th><th>Disposition</th>"
+     "<th>Basis</th></tr></thead>\n"
+     "      <tbody>\n"
+     (str/join "\n" (map-indexed ledger-row ledger)) "\n"
+     "      </tbody>\n"
+     "    </table>\n"
+     "  </section>\n"
+
+     "</main>\n"
+     "<footer>\n"
+     "  <p class=\"muted\">cloud-itonami-isic-0170 — wildlife-harvest operations coordination actor. "
+     "Regenerate with <code>clojure -M:dev:render-html</code>. The page carries no timestamp and is "
+     "byte-identical across reruns; the generator refuses to write a console that contains no HARD "
+     "hold.</p>\n"
+     "</footer>\n"
+     "</body></html>\n")))
+
+(defn -main [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        result (run-demo!)
+        html (render result)
+        ledger (vec (store/ledger (:store result)))
+        hard-count (count (hard-hold-facts ledger))]
+    ;; A console that shows no un-overridable hold has not demonstrated the
+    ;; Governor at all -- make that a build failure, not a convention.
+    (when (zero? hard-count)
+      (throw (ex-info "refusing to write a console with no HARD :governor-hold rendered"
+                      {:out out :ledger-facts (count ledger)})))
+    (spit out html)
+    (println "wrote" out
+             (str "(" (count ledger) " ledger facts, "
+                  hard-count " HARD holds, "
+                  (count (filter #(= :committed (:t %)) ledger)) " commits, "
+                  (count (:runs result)) " graph runs)"))))

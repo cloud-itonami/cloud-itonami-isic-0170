@@ -30,6 +30,18 @@
          {:local/root "../../kotoba-lang/langchain"}}}
   ;; clojure -M:dev:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "huntharvest.sim"]}
+  ;; clojure -M:dev:render-html [out-file] -> regenerate
+  ;; docs/samples/operator-console.html by running the REAL actor
+  ;; (flagship checklist item 2). The design-system dependency is scoped
+  ;; to THIS alias rather than the base :deps on purpose: the console is
+  ;; the only consumer of it, and adding a git coordinate to the base
+  ;; map would put a network-resolvable dependency on the run/test/lint
+  ;; paths that do not need it.
+  :render-html {:extra-deps
+                {io.github.kotoba-lang/jp-go-digital-design-system
+                 {:git/url "https://github.com/kotoba-lang/jp-go-digital-design-system"
+                  :git/sha "83db99546eabc53613ae826ea41d1533a3c574af"}}
+                :main-opts ["-m" "huntharvest.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
