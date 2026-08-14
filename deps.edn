@@ -30,6 +30,14 @@
          {:local/root "../../kotoba-lang/langchain"}}}
   ;; clojure -M:dev:run  -> drive the demo through one OperationActor
   :run {:main-opts ["-m" "huntharvest.sim"]}
+  ;; clojure -M:dev:render-html [out-file] -> regenerate
+  ;; docs/samples/operator-console.html by running the REAL actor
+  ;; (flagship checklist item 2). Deliberately NO extra dependency: the
+  ;; console's stylesheet is read out of the design-system copy already
+  ;; vendored into docs/index.html (see `huntharvest.render-html`), so
+  ;; regenerating the page needs nothing this repo does not already
+  ;; contain and works with no network access at all.
+  :render-html {:main-opts ["-m" "huntharvest.render-html"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
