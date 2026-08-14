@@ -285,7 +285,13 @@
 
 (defn- disposition [run] (get-in run [:state :disposition]))
 
-(defn- audit-types [run] (mapv :t (get-in run [:state :audit])))
+(defn- approval-granted-fact
+  "The `:approval-granted` audit fact the graph emitted for this run, if
+  any. This is the run's OWN record of who signed off, produced by the
+  `:request-approval` node independently of the commit payload -- so it
+  can be compared against what the store ended up keeping."
+  [run]
+  (last (filter #(= :approval-granted (:t %)) (get-in run [:state :audit]))))
 
 (defn- approved-by-in-graph
   "The approver the graph put on the commit payload, if any. This is
@@ -324,12 +330,15 @@
   (for [r runs
         :let [approver (approved-by-in-graph r)]
         :when approver
-        :let [fact (committed-fact-for ledger r)]]
+        :let [fact (committed-fact-for ledger r)
+              granted (approval-granted-fact r)]]
     {:tid (:tid r)
      :op (get-in r [:request :op])
      :subject (get-in r [:request :subject])
      :approver approver
      :fact fact
+     :audit-by (:by granted)
+     :audit-in-ledger? (boolean (and granted (some #(= granted %) ledger)))
      :persisted? (approver-persisted? fact approver)}))
 
 (defn- shipment-rows
@@ -612,9 +621,22 @@ footer p { margin: 0; }
           (esc (name (:disposition fact)))
           (esc (basis-str (:basis fact)))))
 
-(defn- approval-row [{:keys [tid op subject approver persisted?]}]
-  (format "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>"
-          (esc tid) (kw op) (esc subject) (esc approver)
+(defn- approval-row [{:keys [tid op subject approver audit-by audit-in-ledger? persisted?]}]
+  (format (str "        <tr><td><code>%s</code></td><td>%s</td><td><code>%s</code></td>"
+               "<td><code>%s</code></td><td>%s</td><td>%s</td></tr>")
+          (esc tid) (kw op) (esc subject)
+          (esc approver)
+          ;; The approver is never simply omitted: where the commit record
+          ;; dropped it, the identity is still shown, joined from the run's
+          ;; own :approval-granted audit fact and labelled as such -- so
+          ;; "the store did not keep it" can never be misread as "nobody
+          ;; approved this".
+          (if audit-by
+            (format "<code>%s</code> %s" (esc audit-by)
+                    (if audit-in-ledger?
+                      "<span class=\"muted\">(also in the ledger)</span>"
+                      "<span class=\"warn\">(audit only &mdash; not in commit record)</span>"))
+            "<span class=\"muted\">none</span>")
           (if persisted?
             "<span class=\"ok\">retained in the committed ledger fact</span>"
             "<span class=\"critical\">DROPPED &middot; present in the graph payload, absent from the persisted fact</span>")))
@@ -648,13 +670,13 @@ footer p { margin: 0; }
      "    <h3>Does a committed record keep the human who approved it?</h3>\n"
      "    <p class=\"muted\">Every row is an approval the graph really performed; &quot;retained&quot; is decided by searching the ledger fact the store actually kept for the approver the graph recorded. A record with no human approval never appears here at all, so a dropped approver cannot be mistaken for nobody having approved.</p>\n"
      "    <table>\n"
-     "      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Approver (in graph)</th><th>In the persisted ledger fact</th></tr></thead>\n"
+     "      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Approver (commit payload)</th><th>Approver (audit trail)</th><th>In the persisted ledger fact</th></tr></thead>\n"
      "      <tbody>\n"
      (str/join "\n" (map approval-row arows)) "\n"
      "      </tbody>\n"
      "    </table>\n"
      (if (seq dropped)
-       (format (str "    <p class=\"critical\">%s of %s human approvals do not survive into the ledger: the commit fact is built from the advisor's proposal <code>:value</code>, while the approver was written to the approval payload alongside it. The audit log therefore records THAT a harvest record was logged, but not WHO authorised it.</p>\n")
+       (format "    <p class=\"critical\">%s of %s human approvals do not survive into the ledger: the commit fact is built from the advisor's proposal <code>:value</code>, while the approver was written to the approval payload alongside it. The stored audit log therefore records THAT a harvest record was logged, but not WHO authorised it &mdash; the identities in the column beside it are recoverable only from the run's in-memory audit trail, which the store never received.</p>\n"
                (count dropped) (count arows))
        "    <p class=\"ok\">Every human approval in this run survives into the persisted ledger fact.</p>\n")
      "    <h3>Where does the shipment threshold gate get its number?</h3>\n"
@@ -666,7 +688,7 @@ footer p { margin: 0; }
      "      </tbody>\n"
      "    </table>\n"
      (if (seq silent)
-       (format (str "    <p class=\"critical\">%s shipment run(s) auto-committed on a value the request never declared: the advisor supplies its own default when the field is absent, so the number the gate was built to distrust is always present and always low. The Governor's absent/non-numeric fail-safe cannot fire while the advisor fills the field in first.</p>\n")
+       (format "    <p class=\"critical\">%s shipment run(s) auto-committed on a value the request never declared: the advisor supplies its own default when the field is absent, so the number the gate was built to distrust is always present and always low. The Governor's absent/non-numeric fail-safe cannot fire while the advisor fills the field in first.</p>\n"
                (count silent))
        (if (seq substituted)
          "    <p class=\"warn\">A shipment value was substituted by the advisor, but the run still escalated to a human.</p>\n"

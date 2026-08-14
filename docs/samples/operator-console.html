@@ -159,14 +159,14 @@ footer p { margin: 0; }
     <h3>Does a committed record keep the human who approved it?</h3>
     <p class="muted">Every row is an approval the graph really performed; &quot;retained&quot; is decided by searching the ledger fact the store actually kept for the approver the graph recorded. A record with no human approval never appears here at all, so a dropped approver cannot be mistaken for nobody having approved.</p>
     <table>
-      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Approver (in graph)</th><th>In the persisted ledger fact</th></tr></thead>
+      <thead><tr><th>Run</th><th>Op</th><th>Subject</th><th>Approver (commit payload)</th><th>Approver (audit trail)</th><th>In the persisted ledger fact</th></tr></thead>
       <tbody>
-        <tr><td><code>s02</code></td><td><code>:log-harvest-record</code></td><td><code>record-002</code></td><td><code>hunter-op-01</code></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
-        <tr><td><code>s05</code></td><td><code>:flag-conservation-concern</code></td><td><code>record-012</code></td><td><code>hunter-op-01</code></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
-        <tr><td><code>s07</code></td><td><code>:coordinate-shipment</code></td><td><code>record-001</code></td><td><code>hunter-op-01</code></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
+        <tr><td><code>s02</code></td><td><code>:log-harvest-record</code></td><td><code>record-002</code></td><td><code>hunter-op-01</code></td><td><code>hunter-op-01</code> <span class="warn">(audit only &mdash; not in commit record)</span></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
+        <tr><td><code>s05</code></td><td><code>:flag-conservation-concern</code></td><td><code>record-012</code></td><td><code>hunter-op-01</code></td><td><code>hunter-op-01</code> <span class="warn">(audit only &mdash; not in commit record)</span></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
+        <tr><td><code>s07</code></td><td><code>:coordinate-shipment</code></td><td><code>record-001</code></td><td><code>hunter-op-01</code></td><td><code>hunter-op-01</code> <span class="warn">(audit only &mdash; not in commit record)</span></td><td><span class="critical">DROPPED &middot; present in the graph payload, absent from the persisted fact</span></td></tr>
       </tbody>
     </table>
-    <p class="critical">3 of 3 human approvals do not survive into the ledger: the commit fact is built from the advisor's proposal <code>:value</code>, while the approver was written to the approval payload alongside it. The audit log therefore records THAT a harvest record was logged, but not WHO authorised it.</p>
+    <p class="critical">3 of 3 human approvals do not survive into the ledger: the commit fact is built from the advisor's proposal <code>:value</code>, while the approver was written to the approval payload alongside it. The stored audit log therefore records THAT a harvest record was logged, but not WHO authorised it &mdash; the identities in the column beside it are recoverable only from the run's in-memory audit trail, which the store never received.</p>
     <h3>Where does the shipment threshold gate get its number?</h3>
     <p class="muted">The Governor refuses to stand down for a shipment value it cannot establish as present, numeric and below the threshold. This table compares what the request declared with what reached that gate.</p>
     <table>
