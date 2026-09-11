@@ -36,7 +36,7 @@ Publish: enable GitHub Pages on `main` `/docs`, or any static host.
 ## 4. Where the Governor sits
 
 - Blueprint governor key: `huntharvest-governor`
-- Source path: `src/huntharvest/governor.cljc`
+- Source path: `src/huntharvest/governor.cljk`
 - Pattern: a real compiled `langgraph-clj` StateGraph
   (`huntharvest.operation/build`): intake → advise → govern → decide →
   commit | request-approval → commit | hold (itonami actor /

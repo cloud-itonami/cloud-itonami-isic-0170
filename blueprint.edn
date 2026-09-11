@@ -72,7 +72,7 @@
  (unchanged, still used directly by `huntharvest.governor`'s independent
  checks and by the original `run-operation` pure driver, preserved
  unchanged for its own 10 existing tests). Proven end-to-end by
- `test/huntharvest/operation_graph_test.cljc` exercising commit /
+ `test/huntharvest/operation_graph_test.cljk` exercising commit /
  hard-hold (record never registered, and a HARD hunter-license-expired
  violation that pre-empts what would otherwise be an always-escalate op)
  / escalate-approve / escalate-reject / high-value-vs-low-value shipment
