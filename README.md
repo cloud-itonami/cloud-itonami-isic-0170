@@ -65,13 +65,13 @@ Any proposal for an operation outside this allowlist — most importantly anythi
 
 ```bash
 # Run full test suite (langgraph resolved via local sibling checkout)
-clojure -M:dev:test
+kbb -M:dev:test
 
 # Check code quality
-clojure -M:lint
+kbb -M:lint
 
 # Run demo simulation -- drives the compiled StateGraph end-to-end
-clojure -M:dev:run
+kbb -M:dev:run
 ```
 
 ## Standalone Use

@@ -20,7 +20,7 @@ cd cloud-itonami-isic-0170
 ## 2. Run tests
 
 ```bash
-clojure -M:dev:test
+kbb -M:dev:test
 ```
 
 Expect green if maturity is `implemented`. Fix failures before operating.
