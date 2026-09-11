@@ -6,7 +6,7 @@
   single already-formed proposal: it contracts the proposal through
   Governor validation and yields the audit facts. It stays exactly as it
   was -- callers/tests that already depend on this thin, synchronous
-  shape (`test/huntharvest/operation_test.cljc`) keep working unchanged.
+  shape (`test/huntharvest/operation_test.cljk`) keep working unchanged.
 
   `build` is the missing plumbing: a REAL langgraph-clj StateGraph
   (`langgraph.graph/state-graph` + `compile-graph`) that seals the
@@ -39,7 +39,7 @@
        compiled graph below.
     3. `huntharvest.store/append-fact` (the ledger-append function)
        existed but was called ONLY from
-       `test/huntharvest/store_test.cljc` test setup -- never from any
+       `test/huntharvest/store_test.cljk` test setup -- never from any
        real commit/hold path, since there was no real commit/hold path
        (`run-operation` above never touches a store; it only returns
        facts to the caller). Fixed: `huntharvest.store/append-ledger!`

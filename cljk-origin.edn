@@ -1,0 +1,21 @@
+{:format :kotoba.cljk-origin/v1
+ :renamed-on "2026-09-11"
+ :decision "adr-2609111500-cljk-rename-all-clojure-source (com-junkawasaki/root 90-docs/adr; owner instruction 2026-09-11)"
+ :rule "value = the extension the file had before the rename. A path ending in .clj.cljk or .cljs.cljk kept it in the name because both platform files existed (or the plain target was taken)."
+ :origins
+ {"src/huntharvest/advisor.cljk" ".cljc"
+  "src/huntharvest/facts.cljk" ".cljc"
+  "src/huntharvest/governor.cljk" ".cljc"
+  "src/huntharvest/operation.cljk" ".cljc"
+  "src/huntharvest/phase.cljk" ".cljc"
+  "src/huntharvest/registry.cljk" ".cljc"
+  "src/huntharvest/render_html.cljk" ".clj"
+  "src/huntharvest/sim.cljk" ".cljc"
+  "src/huntharvest/store.cljk" ".cljc"
+  "test/huntharvest/facts_test.cljk" ".cljc"
+  "test/huntharvest/governor_test.cljk" ".cljc"
+  "test/huntharvest/operation_graph_test.cljk" ".cljc"
+  "test/huntharvest/operation_test.cljk" ".cljc"
+  "test/huntharvest/phase_test.cljk" ".cljc"
+  "test/huntharvest/registry_test.cljk" ".cljc"
+  "test/huntharvest/store_test.cljk" ".cljc"}}

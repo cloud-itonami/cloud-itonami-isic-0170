@@ -131,7 +131,7 @@
   (append-ledger! [s fact]
     "Append one immutable decision fact -- delegates to `append-fact`
     above. Returns `fact`. THIS is the call that was previously reachable
-    ONLY from `test/huntharvest/store_test.cljc` -- never from any real
+    ONLY from `test/huntharvest/store_test.cljk` -- never from any real
     execution path, since `huntharvest.operation` had no real `:commit`/
     `:hold` node -- fixed by wiring it into
     `huntharvest.operation/build`'s compiled StateGraph."))
