@@ -32,7 +32,7 @@
   (unlike the two trap-specific fields above) since every jurisdiction in
   this actor's scope requires a license/tag and a quota allocation for
   both hunting and trapping."
-  (:require [clojure.set :as set]))
+  (:require [kotoba.lang.coll :as set]))
 
 (def harvest-methods
   "Valid licensed harvest-method categories and their safety windows.
