@@ -1,5 +1,5 @@
 (ns huntharvest.phase-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [huntharvest.phase :as phase]))
 
 ;; ──────────────────────── Phase Validity ──────────────────────
