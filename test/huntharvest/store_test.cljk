@@ -1,5 +1,5 @@
 (ns huntharvest.store-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [huntharvest.store :as store]))
 
 ;; ──────────────────────── Harvest-Record Retrieval ──────────────────────
